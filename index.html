@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ideas Need Room</title>
+<style>
+  @font-face { font-family: "Spot Sans"; src: url(assets/fonts/Inter-Variable.woff2) format("woff2"); font-weight: 100 900; }
+  @font-face { font-family: "Spot Serif"; src: url(assets/fonts/InstrumentSerif-Regular.woff2) format("woff2"); font-style: normal; }
+  @font-face { font-family: "Spot Serif"; src: url(assets/fonts/InstrumentSerif-Italic.woff2) format("woff2"); font-style: italic; }
+  @font-face { font-family: "Spot Mono"; src: url(assets/fonts/JetBrainsMono-Medium.woff2) format("woff2"); font-weight: 500; }
+
+  :root { --bg: #05070d; --ink: #F5F0E6; --gold: #F3B54A; --muted: rgba(245,240,230,.55); }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: "Spot Sans", system-ui, sans-serif; }
+  body { display: grid; place-items: center; overflow: hidden; }
+  .stage { position: relative; width: min(100vw, calc((100vh - 64px) * 16 / 9)); aspect-ratio: 16 / 9; }
+  canvas { display: block; width: 100%; height: 100%; background: #000; }
+  .overlay { position: absolute; inset: 0; display: grid; place-items: center; background: rgba(5,7,13,.55); cursor: pointer; transition: opacity .3s; }
+  .overlay.hidden { opacity: 0; pointer-events: none; }
+  .play { display: flex; flex-direction: column; align-items: center; gap: 14px; }
+  .play .btn { width: 96px; height: 96px; border-radius: 50%; border: 2px solid var(--gold); display: grid; place-items: center; }
+  .play .btn::after { content: ""; border-left: 30px solid var(--gold); border-top: 18px solid transparent; border-bottom: 18px solid transparent; margin-left: 8px; }
+  .play span { font: 500 13px/1.4 "Spot Mono", monospace; letter-spacing: .2em; color: var(--muted); text-transform: uppercase; }
+  .bar { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; display: flex; align-items: center; gap: 16px; padding: 0 16px; font: 500 13px "Spot Mono", monospace; color: var(--muted); }
+  .bar button { background: none; border: 1px solid rgba(245,240,230,.25); color: var(--ink); border-radius: 6px; height: 34px; min-width: 44px; padding: 0 12px; font: inherit; cursor: pointer; }
+  .bar button:hover { border-color: var(--gold); color: var(--gold); }
+  .bar input[type=range] { flex: 1; accent-color: var(--gold); min-width: 0; }
+  .time { width: 92px; text-align: right; font-variant-numeric: tabular-nums; }
+  @media (max-width: 600px) { .hide-sm { display: none; } }
+</style>
+</head>
+<body>
+<div class="stage" id="stage">
+  <canvas id="c" width="1920" height="1080"></canvas>
+  <div class="overlay" id="overlay">
+    <div class="play"><div class="btn"></div><span id="hint">Play · sound on</span></div>
+  </div>
+</div>
+<div class="bar">
+  <button id="pp" aria-label="Play / pause">Play</button>
+  <input id="scrub" type="range" min="0" max="30" step="0.001" value="0" aria-label="Scrub">
+  <span class="time" id="time">00.00 / 30</span>
+  <button id="fs" class="hide-sm">Fullscreen</button>
+</div>
+<script src="spot.js"></script>
+<script>
+(() => {
+  const canvas = document.getElementById('c'), ctx = canvas.getContext('2d');
+  const overlay = document.getElementById('overlay'), hint = document.getElementById('hint');
+  const pp = document.getElementById('pp'), scrub = document.getElementById('scrub'), time = document.getElementById('time');
+  const fontsReady = Promise.all([
+    '900 100px "Spot Sans"', '500 100px "Spot Sans"', 'italic 400 100px "Spot Serif"', '400 100px "Spot Serif"', '500 100px "Spot Mono"',
+  ].map(f => document.fonts.load(f))).catch(() => {});
+
+  const rendering = new URLSearchParams(location.search).has('render');
+  let actx = null, src = null, startedAt = 0, offset = 0, playing = false, started = false, busy = false, dirty = true;
+  // The soundtrack is composed offline as soon as the page loads (no user gesture needed),
+  // so pressing Play is instant. The headless renderer composes its own copy instead.
+  const audioReady = rendering ? null : fontsReady.then(() => Spot.renderAudio(48000));
+
+  const now = () => (playing ? actx.currentTime - startedAt : offset);
+  function frame() {
+    if (playing || dirty) {
+      let t = started ? now() : 29.0;   // poster frame until first play
+      if (playing && t >= Spot.DUR) { stop(); offset = Spot.DUR; t = Spot.DUR; }
+      Spot.draw(ctx, t);
+      scrub.value = t;
+      time.textContent = t.toFixed(2).padStart(5, '0') + ' / 30';
+      dirty = false;
+    }
+    requestAnimationFrame(frame);
+  }
+
+  async function play() {
+    if (busy || playing) return;
+    busy = true;
+    try {
+      actx = actx || new (window.AudioContext || window.webkitAudioContext)({ latencyHint: 'playback' });
+      const resumed = actx.resume();          // must start inside the click handler
+      hint.textContent = 'Composing soundtrack…';
+      const buffer = await audioReady;
+      await resumed;
+      if (offset >= Spot.DUR - 0.05) offset = 0;
+      src = actx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(actx.destination);
+      startedAt = actx.currentTime + 0.05 - offset;
+      src.start(actx.currentTime + 0.05, offset);
+      playing = true; started = true;
+      overlay.classList.add('hidden');
+      pp.textContent = 'Pause';
+    } finally { busy = false; }
+  }
+  function stop() {
+    if (!playing) return;
+    offset = now();
+    try { src.stop(); } catch (e) {}
+    playing = false; dirty = true;
+    pp.textContent = 'Play';
+  }
+
+  overlay.addEventListener('click', play);
+  pp.addEventListener('click', () => (playing ? stop() : play()));
+  scrub.addEventListener('input', () => { const was = playing; stop(); started = true; dirty = true; offset = +scrub.value; if (was) play(); });
+  document.getElementById('fs').addEventListener('click', () => document.getElementById('stage').requestFullscreen?.());
+  document.addEventListener('keydown', e => { if (e.code === 'Space') { e.preventDefault(); playing ? stop() : play(); } });
+
+  if (!rendering) fontsReady.then(() => requestAnimationFrame(frame));
+
+  // Hooks for the headless renderer.
+  window.SpotRender = {
+    ready: fontsReady,
+    frame: (t, type = 'image/png') => { Spot.draw(ctx, t); return canvas.toDataURL(type); },
+    wav: async () => {
+      const buf = await Spot.renderAudio(48000);
+      const bytes = new Uint8Array(Spot.encodeWav(buf));
+      let s = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) s += String.fromCharCode.apply(null, bytes.subarray(i, i + 0x8000));
+      return btoa(s);
+    },
+  };
+})();
+</script>
+</body>
+</html>
